@@ -23,14 +23,14 @@ class MSLS(Dataset):
         Mapillary Street-level Sequences数据集的读取
 
         :param root_dir: 数据集的路径
-        :param mode: 数据集的模式
+        :param mode: 数据集的模式[train, val, test]
         :param cities_list: 城市列表
         :param img_transform: 图像转换函数
         :param negative_num: 每个正例对应的反例个数
         :param positive_distance_threshold: 正例的距离阈值
         :param negative_distance_threshold: 反例的距离阈值
         :param batch_size: 每批数据的大小
-        :param task: 任务类型
+        :param task: 任务类型[im2im, seq2seq, seq2im, im2seq]
         :param seq_length: 不同任务的序列长度
         :param exclude_panos: 是否排除全景图像
         """
@@ -99,12 +99,12 @@ class MSLS(Dataset):
             if idx < (seq_length // 2) or idx >= (len(seq_info) - seq_length // 2):
                 continue
 
-            # 计算当前帧的周边帧
+            # 计算当前序列数据帧的周边帧
             seq_idx = np.arange(-seq_length // 2, seq_length // 2) + 1 + idx
             # 获取一个序列帧
             seq = seq_info.iloc[seq_idx]
 
-            # the sequence must have the same sequence key and must have consecutive frames
+            # 一个序列必须是具有相同的序列键值（即sequence_key相同），以及连续的帧（即frame_number之间的差值为1）
             if len(np.unique(seq['sequence_key'])) == 1 and (seq['frame_number'].diff()[1:] == 1).all():
                 seq_key = ','.join([join(path, 'images', key + '.jpg') for key in seq['key']])
 
