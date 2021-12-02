@@ -18,9 +18,13 @@ default_cities = {
 class MSLS(Dataset):
     def __init__(self, root_dir, mode='train', cities_list=None, img_transform=None, negative_num=5,
                  positive_distance_threshold=10, negative_distance_threshold=25, batch_size=24, task='im2im',
-                 seq_length=1, exclude_panos=True):
+                 sub_task='all', seq_length=1, exclude_panos=True):
         """
         Mapillary Street-level Sequences数据集的读取
+
+        task（任务）：im2im（图像到图像）, seq2seq（图像序列到图像序列）, seq2im（图像序列到图像）, im2seq（图像到图像序列）
+
+        sub_task（子任务）：all，s2w（summer2winter），w2s（winter2summer），o2n（old2new），n2o（new2old），d2n（day2night），n2d（night2day）
 
         :param root_dir: 数据集的路径
         :param mode: 数据集的模式[train, val, test]
@@ -30,7 +34,8 @@ class MSLS(Dataset):
         :param positive_distance_threshold: 正例的距离阈值
         :param negative_distance_threshold: 反例的距离阈值
         :param batch_size: 每批数据的大小
-        :param task: 任务类型[im2im, seq2seq, seq2im, im2seq]
+        :param task: 任务类型 [im2im, seq2seq, seq2im, im2seq]
+        :param sub_task: 任务类型 [all, s2w, w2s, o2n, n2o, d2n, n2d]
         :param seq_length: 不同任务的序列长度
         :param exclude_panos: 是否排除全景图像
         """
@@ -77,6 +82,9 @@ class MSLS(Dataset):
                 db_seq_keys, db_seq_idxs = self.rang_to_sequence(db_data, join(root_dir, subdir, city, 'database'),
                                                                  seq_length_db)
 
+                if self.mode in ['val']:
+                    print('xxx')
+
 
         print('xxx')
 
@@ -94,7 +102,7 @@ class MSLS(Dataset):
         # 图像序列的名称和图像序列的索引
         seq_keys, seq_idxs = [], []
 
-        for idx in tqdm(data.index):
+        for idx in data.index:
             # 边界的情况
             if idx < (seq_length // 2) or idx >= (len(seq_info) - seq_length // 2):
                 continue
