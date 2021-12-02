@@ -46,7 +46,14 @@ class MSLS(Dataset):
         else:
             self.cities_list = cities_list.split(',')
 
+        # 筛选后的Query图像
+        self.q_images_key = []
+        # 筛选后的Database图像
+        self.db_images_key = []
+
         self.mode = mode
+        self.sub_task = sub_task
+        self.exclude_panos = exclude_panos
 
         # 根据任务类型得到序列长度
         if task == 'im2im': # 图像到图像
@@ -82,8 +89,43 @@ class MSLS(Dataset):
                 db_seq_keys, db_seq_idxs = self.rang_to_sequence(db_data, join(root_dir, subdir, city, 'database'),
                                                                  seq_length_db)
 
+                # 如果验证集，那么需要确定子任务的类型
                 if self.mode in ['val']:
-                    print('xxx')
+                    q_idx = pd.read_csv(join(root_dir, subdir, city, 'query', 'subtask_index.csv'), index_col=0)
+                    db_idx = pd.read_csv(join(root_dir, subdir, city, 'database', 'subtask_index.csv'), index_col=0)
+
+                    # 从所有序列数据中根据符合子任务的中心索引找到序列数据帧
+                    val_frames = np.where(q_idx[self.sub_task])[0]
+                    q_seq_keys, q_seq_idxs = self.filter(q_seq_keys, q_seq_idxs, val_frames)
+
+                    val_frames = np.where(db_idx[self.sub_task])[0]
+                    db_seq_keys, db_seq_idxs = self.filter(db_seq_keys, db_seq_idxs, val_frames)
+
+                # 筛选出不同全景的数据
+                if self.exclude_panos:
+                    panos_frames = np.where((q_data_raw['pano'] == False).values)[0]
+                    # 从Query数据中筛选出不是全景的数据
+                    q_seq_keys, q_seq_idxs = self.filter(q_seq_keys, q_seq_idxs, panos_frames)
+
+                    panos_frames = np.where((db_data_raw['pano'] == False).values)[0]
+                    # 从Query数据中筛选出不是全景的数据
+                    db_seq_keys, db_seq_idxs = self.filter(db_seq_keys, db_seq_idxs, panos_frames)
+
+                # 删除重复的idx
+                unique_q_seq_idxs = np.unique(q_seq_idxs)
+                unique_db_seq_idxs = np.unique(db_seq_idxs)
+
+                # 如果排除重复后没有数据，那么就下一个城市
+                if len(unique_q_seq_idxs) == 0 or len(unique_db_seq_idxs) == 0:
+                    continue
+
+                # 保存筛选后的图像
+                self.q_images_key.extend(q_seq_keys)
+                self.db_images_key.extend(db_seq_keys)
+
+                # 从原数据中筛选后数据
+                q_data = q_data.loc[unique_q_seq_idxs]
+                db_data = db_data.loc[unique_db_seq_idxs]
 
 
         print('xxx')
@@ -122,4 +164,21 @@ class MSLS(Dataset):
                 seq_idxs.append(seq_idx)
 
         return seq_keys, np.asarray(seq_idxs)
+
+    def filter(self, seq_keys, seq_idxs, center_frame_condition):
+        """
+        根据序列中心点索引筛选序列
+
+        :param seq_keys: 序列Key值
+        :param seq_idxs: 序列索引
+        :param center_frame_condition: 条件筛选的中心帧
+        :return: 返回筛选后的Key和Idx
+        """
+        keys, idxs = [], []
+        for key, idx in zip(seq_keys, seq_idxs):
+            # 如果序列的中间索引在中心帧中，那么就把Key和Idx放入数组中
+            if idx[len(idx) // 2] in center_frame_condition:
+                keys.append(key)
+                idxs.append(idx)
+        return keys, np.asarray(idxs)
 
