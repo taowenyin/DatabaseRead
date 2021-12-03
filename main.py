@@ -11,7 +11,7 @@ if __name__ == '__main__':
 
     opt = parser.parse_args()
 
-    dataset = MSLS(root_dir=opt.dataset_root_dir,
+    dataset = MSLS(root_dir=opt.dataset_root_dir, cities_list='trondheim',
                    mode='train', task='seq2seq', seq_length=1)
 
     pass

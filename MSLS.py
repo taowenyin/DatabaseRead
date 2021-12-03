@@ -1,6 +1,7 @@
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from os.path import join
+from sklearn.neighbors import NearestNeighbors
 
 import pandas as pd
 import numpy as np
@@ -50,10 +51,14 @@ class MSLS(Dataset):
         self.q_images_key = []
         # 筛选后的Database图像
         self.db_images_key = []
+        # 所有Query对应的正例索引
+        self.all_positive_indices = []
 
         self.mode = mode
         self.sub_task = sub_task
         self.exclude_panos = exclude_panos
+        self.positive_distance_threshold = positive_distance_threshold
+        self.negative_distance_threshold = negative_distance_threshold
 
         # 根据任务类型得到序列长度
         if task == 'im2im': # 图像到图像
@@ -127,8 +132,40 @@ class MSLS(Dataset):
                 q_data = q_data.loc[unique_q_seq_idxs]
                 db_data = db_data.loc[unique_db_seq_idxs]
 
+                # 获取图像的UTM坐标
+                utm_q = q_data[['easting', 'northing']].values.reshape(-1, 2)
+                utm_db = db_data[['easting', 'northing']].values.reshape(-1, 2)
+
+                # 获取Query图像的Night状态、否是Sideways，以及图像索引
+                night, sideways, index = q_data['night'].values, \
+                                         (q_data['view_direction'] == 'Sideways').values, \
+                                         q_data.index
+
+                # 创建最近邻算法，使用暴力搜索法
+                neigh = NearestNeighbors(algorithm='brute')
+                # 对数据集进行拟合
+                neigh.fit(utm_db)
+                # 在Database中找到符合positive_distance_threshold要求的Query数据的最近邻数据的索引
+                positive_distance, positive_indices = neigh.radius_neighbors(utm_q, self.positive_distance_threshold)
+                # 保存所有正例索引
+                self.all_positive_indices.extend(positive_indices)
+
+                # 训练模式下，获取负例索引
+                if self.mode == 'train':
+                    negative_distance, negative_indices = neigh.radius_neighbors(
+                        utm_q, self.negative_distance_threshold)
+
+                for q_seq_key_idx in range(len(q_seq_keys)):
+                    q_frame_ = self.seq_idx_2_frame_idx(q_seq_key_idx, q_seq_idxs)
+                    print('xxx')
+
+                print('xx')
+
 
         print('xxx')
+
+    def seq_idx_2_frame_idx(self, q_seq_key, q_seq_keys):
+        return q_seq_keys[q_seq_key]
 
     def rang_to_sequence(self, data, path, seq_length):
         """
