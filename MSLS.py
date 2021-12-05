@@ -5,6 +5,7 @@ from sklearn.neighbors import NearestNeighbors
 
 import pandas as pd
 import numpy as np
+import sys
 
 
 default_cities = {
@@ -19,7 +20,7 @@ default_cities = {
 class MSLS(Dataset):
     def __init__(self, root_dir, mode='train', cities_list=None, img_transform=None, negative_num=5,
                  positive_distance_threshold=10, negative_distance_threshold=25, batch_size=24, task='im2im',
-                 sub_task='all', seq_length=1, exclude_panos=True):
+                 sub_task='all', seq_length=1, exclude_panos=True, positive_sampling=True):
         """
         Mapillary Street-level Sequences数据集的读取
 
@@ -39,6 +40,7 @@ class MSLS(Dataset):
         :param sub_task: 任务类型 [all, s2w, w2s, o2n, n2o, d2n, n2d]
         :param seq_length: 不同任务的序列长度
         :param exclude_panos: 是否排除全景图像
+        :param positive_sampling: 是否进行正采样
         """
         super().__init__()
 
@@ -53,6 +55,16 @@ class MSLS(Dataset):
         self.db_images_key = []
         # 所有Query对应的正例索引
         self.all_positive_indices = []
+        # Query的序列索引
+        self.q_seq_idx = []
+        # positive的序列索引
+        self.p_seq_idx = []
+        # 不是负例的索引
+        self.non_negative_indices = []
+        # 路边的数据
+        self.sideways = []
+        # 晚上的数据
+        self.night = []
 
         self.mode = mode
         self.sub_task = sub_task
@@ -78,6 +90,17 @@ class MSLS(Dataset):
             # 根据城市获得数据文件夹名称
             subdir = 'test' if city in default_cities['test'] else 'train_val'
 
+            # 保存没有正例的图像数
+            non_positive_q_seq_keys_count = 0
+            # 保存有正例的图像数
+            has_positive_q_seq_keys_count = 0
+            # 保存数据集的个数
+            q_seq_keys_count = 0
+
+            # 获取到目前为止用于索引的城市图像的长度
+            _lenQ = len(self.q_images_key)
+            _lenDb = len(self.db_images_key)
+
             # 读取训练集或验证集数据集
             if self.mode in ['train', 'val']:
                 # 载入Query数据
@@ -93,6 +116,7 @@ class MSLS(Dataset):
                                                                seq_length_q)
                 db_seq_keys, db_seq_idxs = self.rang_to_sequence(db_data, join(root_dir, subdir, city, 'database'),
                                                                  seq_length_db)
+                q_seq_keys_count = len(q_seq_keys)
 
                 # 如果验证集，那么需要确定子任务的类型
                 if self.mode in ['val']:
@@ -155,17 +179,170 @@ class MSLS(Dataset):
                     negative_distance, negative_indices = neigh.radius_neighbors(
                         utm_q, self.negative_distance_threshold)
 
+                # 查看每个Seq的正例
                 for q_seq_key_idx in range(len(q_seq_keys)):
-                    q_frame_ = self.seq_idx_2_frame_idx(q_seq_key_idx, q_seq_idxs)
-                    print('xxx')
+                    # 返回每个序列的帧集合
+                    q_frame_idxs = self.seq_idx_2_frame_idx(q_seq_key_idx, q_seq_idxs)
+                    # 返回q_frame_idxs在unique_q_seq_idxs中的索引集合
+                    q_uniq_frame_idx = self.frame_idx_2_uniq_frame_idx(q_frame_idxs, unique_q_seq_idxs)
+                    # 返回序列Query中序列对应的正例索引
+                    positive_uniq_frame_idxs = np.unique([p for pos in positive_indices[q_uniq_frame_idx] for p in pos])
 
-                print('xx')
+                    # 查询的序列Query至少要有一个正例
+                    if len(positive_uniq_frame_idxs) > 0:
+                        # 获取正例所在的序列索引，并去除重复的索引
+                        positive_seq_idx = np.unique(self.uniq_frame_idx_2_seq_idx(
+                            unique_db_seq_idxs[positive_uniq_frame_idxs], db_seq_idxs))
 
+                        # todo 不知道是什么意思
+                        self.p_seq_idx.append(positive_seq_idx + _lenDb)
+                        self.q_seq_idx.append(q_seq_key_idx + _lenQ)
 
-        print('xxx')
+                        # 在训练的时候需要根据两个阈值找到正例和负例
+                        if self.mode == 'train':
+                            # 找到不是负例的数据
+                            n_uniq_frame_idxs = np.unique(
+                                [n for nonNeg in negative_indices[q_uniq_frame_idx] for n in nonNeg])
+                            # 找到不是负例所在的序列索引，并去除重复的索引
+                            n_seq_idx = np.unique(
+                                self.uniq_frame_idx_2_seq_idx(unique_db_seq_idxs[n_uniq_frame_idxs], db_seq_idxs))
+
+                            # 保存数据
+                            self.non_negative_indices.append(n_seq_idx + _lenDb)
+
+                            # todo 不知道是什么意思
+                            if sum(night[np.in1d(index, q_frame_idxs)]) > 0:
+                                self.night.append(len(self.q_seq_idx) - 1)
+                            if sum(sideways[np.in1d(index, q_frame_idxs)]) > 0:
+                                self.sideways.append(len(self.q_seq_idx) - 1)
+
+                        has_positive_q_seq_keys_count += 1
+                    else:
+                        non_positive_q_seq_keys_count += 1
+
+            # 读取测试集数据集，GPS/UTM/Pano都不可用
+            elif self.mode in ['test']:
+                # 载入对应子任务的图像索引
+                q_idx = pd.read_csv(join(root_dir, subdir, city, 'query', 'subtask_index.csv'), index_col=0)
+                db_idx = pd.read_csv(join(root_dir, subdir, city, 'database', 'subtask_index.csv'), index_col=0)
+
+                # 根据任务把数据变成序列
+                q_seq_keys, q_seq_idxs = self.rang_to_sequence(q_idx, join(root_dir, subdir, city, 'query'),
+                                                               seq_length_q)
+                db_seq_keys, db_seq_idxs = self.rang_to_sequence(db_idx, join(root_dir, subdir, city, 'database'),
+                                                                 seq_length_db)
+
+                # 从所有序列数据中根据符合子任务的中心索引找到序列数据帧
+                val_frames = np.where(q_idx[self.sub_task])[0]
+                q_seq_keys, q_seq_idxs = self.filter(q_seq_keys, q_seq_idxs, val_frames)
+
+                val_frames = np.where(db_idx[self.sub_task])[0]
+                db_seq_keys, db_seq_idxs = self.filter(db_seq_keys, db_seq_idxs, val_frames)
+
+                # 保存筛选后的图像
+                self.q_images_key.extend(q_seq_keys)
+                self.db_images_key.extend(db_seq_keys)
+
+                # 添加Query索引
+                self.q_seq_idx.extend(list(range(_lenQ, len(q_seq_keys) + _lenQ)))
+
+            tqdm.write('{}城市的数据，有正例的图像有[{}/{}]个，没有正例的图像有[{}/{}]个'.format(
+                city,
+                has_positive_q_seq_keys_count,
+                q_seq_keys_count,
+                non_positive_q_seq_keys_count,
+                q_seq_keys_count))
+
+        # 如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出。
+        if len(self.q_images_key) == 0 or len(self.db_images_key) == 0:
+            tqdm.write("退出...")
+            tqdm.write("如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出")
+            tqdm.write("尝试选择不同的子任务或其他城市")
+            sys.exit()
+
+        self.q_seq_idx = np.asarray(self.q_seq_idx)
+        self.q_images_key = np.asarray(self.q_images_key)
+        self.p_seq_idx = np.asarray(self.p_seq_idx, dtype=object)
+        self.non_negative_indices = np.asarray(self.non_negative_indices, dtype=object)
+        self.db_images_key= np.asarray(self.db_images_key)
+        self.sideways = np.asarray(self.sideways)
+        self.night = np.asarray(self.night)
+
+        if self.mode in ['train']:
+            # 计算正例采样的权重
+            if positive_sampling:
+                self.__calcSamplingWeights__()
+            else:
+                self.weights = np.ones(len(self.q_seq_idx)) / float(len(self.q_seq_idx))
+
+    def __calcSamplingWeights__(self):
+        """
+        计算数据权重
+        """
+        # 计算Query大小
+        N = len(self.q_seq_idx)
+
+        # 初始化权重都为1
+        self.weights = np.ones(N)
+
+        # 夜间或侧面时权重更高
+        if len(self.night) != 0:
+            self.weights[self.night] += N / len(self.night)
+        if len(self.sideways) != 0:
+            self.weights[self.sideways] += N / len(self.sideways)
+
+        # 打印权重信息
+        tqdm.write("#侧面 [{}/{}]; #夜间; [{}/{}]".format(len(self.sideways), N, len(self.night), N))
+        tqdm.write("正面和白天的权重为{:.4f}".format(1))
+        if len(self.night) != 0:
+            tqdm.write("正面且夜间的权重为{:.4f}".format(1 + N / len(self.night)))
+        if len(self.sideways) != 0:
+            tqdm.write("侧面且白天的权重为{:.4f}".format(1 + N / len(self.sideways)))
+        if len(self.sideways) != 0 and len(self.night) != 0:
+            tqdm.write("侧面且夜间的权重为{:.4f}".format(1 + N / len(self.night) + N / len(self.sideways)))
+
 
     def seq_idx_2_frame_idx(self, q_seq_key, q_seq_keys):
+        """
+        把序列索引转化为帧索引
+
+        :param q_seq_key: 序列索引
+        :param q_seq_keys: 序列集合
+        :return: 索引对应的序列集合
+        """
         return q_seq_keys[q_seq_key]
+
+    def frame_idx_2_uniq_frame_idx(self, frame_idx, uniq_frame_idx):
+        """
+        获取frame_idx在uniq_frame_idx中的索引列表
+
+        :param frame_idx: 一个序列的帧ID
+        :param uniq_frame_idx: 所有帧ID
+        :return: 获取frame_idx在uniq_frame_idx中的索引列表
+        """
+
+        # 在不重复的数据帧列表uniq_frame_idx中找到要找的数据帧frame_idx，并产生对应的Mask
+        frame_mask = np.in1d(uniq_frame_idx, frame_idx)
+
+        # 返回frame_idx在uniq_frame_idx中的索引
+        return np.where(frame_mask)[0]
+
+    def uniq_frame_idx_2_seq_idx(self, frame_idxs, seq_idxs):
+        """
+        返回图像帧对应的序列索引
+
+        :param frame_idxs: 图像帧
+        :param seq_idxs: 序列索引
+        :return: 图像正所在的序列索引
+        """
+
+        # 在序列索引列表seq_idxs中找到要找的数据帧frame_idxs，并产生对应的Mask
+        mask = np.in1d(seq_idxs, frame_idxs)
+        # 把Mask重新组织成seq_idxs的形状
+        mask = mask.reshape(seq_idxs.shape)
+
+        # 得到序列的索引
+        return np.where(mask)[0]
 
     def rang_to_sequence(self, data, path, seq_length):
         """
