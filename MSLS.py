@@ -1,4 +1,5 @@
 from torch.utils.data import Dataset
+from torch.utils.data.dataset import T_co
 from tqdm import tqdm
 from os.path import join
 from sklearn.neighbors import NearestNeighbors
@@ -395,4 +396,18 @@ class MSLS(Dataset):
                 keys.append(key)
                 idxs.append(idx)
         return keys, np.asarray(idxs)
+
+    def __len__(self):
+        return 10
+
+    def __getitem__(self, index):
+
+        return None, None, None, None,
+
+    @staticmethod
+    def collate_fn(batch):
+        batch = list(filter(lambda x: x is not None, batch))
+
+
+        return None
 
