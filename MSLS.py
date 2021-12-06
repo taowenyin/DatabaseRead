@@ -19,9 +19,9 @@ default_cities = {
 
 
 class MSLS(Dataset):
-    def __init__(self, root_dir, mode='train', cities_list=None, img_transform=None, negative_num=5,
-                 positive_distance_threshold=10, negative_distance_threshold=25, batch_size=24, task='im2im',
-                 sub_task='all', seq_length=1, exclude_panos=True, positive_sampling=True):
+    def __init__(self, root_dir, mode='train', cities_list=None, img_transform=None, negative_size=5,
+                 positive_distance_threshold=10, negative_distance_threshold=25, cached_queries=1000,
+                 batch_size=24, task='im2im', sub_task='all', seq_length=1, exclude_panos=True, positive_sampling=True):
         """
         Mapillary Street-level Sequences数据集的读取
 
@@ -33,9 +33,10 @@ class MSLS(Dataset):
         :param mode: 数据集的模式[train, val, test]
         :param cities_list: 城市列表
         :param img_transform: 图像转换函数
-        :param negative_num: 每个正例对应的反例个数
+        :param negative_size: 每个正例对应的反例个数
         :param positive_distance_threshold: 正例的距离阈值
-        :param negative_distance_threshold: 反例的距离阈值
+        :param negative_distance_threshold: 反例的距离阈值，在该距离之内认为是非反例，之外才属于反例，同时正例要在正例阈值内才算正例，正例阈值和负例阈值之间属于非负例
+        :param cached_queries: 每次缓存的Query总数，即每个完整的EPOCH中，数据的总量，和Batch Size不同
         :param batch_size: 每批数据的大小
         :param task: 任务类型 [im2im, seq2seq, seq2im, im2seq]
         :param sub_task: 任务类型 [all, s2w, w2s, o2n, n2o, d2n, n2d]
@@ -67,11 +68,19 @@ class MSLS(Dataset):
         # 晚上的数据
         self.night = []
 
+        # 三元数据
+        self.triplets_data = []
+
         self.mode = mode
         self.sub_task = sub_task
         self.exclude_panos = exclude_panos
+        self.negative_num = negative_size
         self.positive_distance_threshold = positive_distance_threshold
         self.negative_distance_threshold = negative_distance_threshold
+        self.cached_queries = cached_queries
+
+        # 记录当前EPOCH调用数据集自己的次数，也就是多少个cached_queries数据
+        self.current_subset = 0
 
         # 根据任务类型得到序列长度
         if task == 'im2im': # 图像到图像
@@ -126,20 +135,20 @@ class MSLS(Dataset):
 
                     # 从所有序列数据中根据符合子任务的中心索引找到序列数据帧
                     val_frames = np.where(q_idx[self.sub_task])[0]
-                    q_seq_keys, q_seq_idxs = self.filter(q_seq_keys, q_seq_idxs, val_frames)
+                    q_seq_keys, q_seq_idxs = self.data_filter(q_seq_keys, q_seq_idxs, val_frames)
 
                     val_frames = np.where(db_idx[self.sub_task])[0]
-                    db_seq_keys, db_seq_idxs = self.filter(db_seq_keys, db_seq_idxs, val_frames)
+                    db_seq_keys, db_seq_idxs = self.data_filter(db_seq_keys, db_seq_idxs, val_frames)
 
                 # 筛选出不同全景的数据
                 if self.exclude_panos:
                     panos_frames = np.where((q_data_raw['pano'] == False).values)[0]
                     # 从Query数据中筛选出不是全景的数据
-                    q_seq_keys, q_seq_idxs = self.filter(q_seq_keys, q_seq_idxs, panos_frames)
+                    q_seq_keys, q_seq_idxs = self.data_filter(q_seq_keys, q_seq_idxs, panos_frames)
 
                     panos_frames = np.where((db_data_raw['pano'] == False).values)[0]
                     # 从Query数据中筛选出不是全景的数据
-                    db_seq_keys, db_seq_idxs = self.filter(db_seq_keys, db_seq_idxs, panos_frames)
+                    db_seq_keys, db_seq_idxs = self.data_filter(db_seq_keys, db_seq_idxs, panos_frames)
 
                 # 删除重复的idx
                 unique_q_seq_idxs = np.unique(q_seq_idxs)
@@ -235,10 +244,10 @@ class MSLS(Dataset):
 
                 # 从所有序列数据中根据符合子任务的中心索引找到序列数据帧
                 val_frames = np.where(q_idx[self.sub_task])[0]
-                q_seq_keys, q_seq_idxs = self.filter(q_seq_keys, q_seq_idxs, val_frames)
+                q_seq_keys, q_seq_idxs = self.data_filter(q_seq_keys, q_seq_idxs, val_frames)
 
                 val_frames = np.where(db_idx[self.sub_task])[0]
-                db_seq_keys, db_seq_idxs = self.filter(db_seq_keys, db_seq_idxs, val_frames)
+                db_seq_keys, db_seq_idxs = self.data_filter(db_seq_keys, db_seq_idxs, val_frames)
 
                 # 保存筛选后的图像
                 self.q_images_key.extend(q_seq_keys)
@@ -272,11 +281,58 @@ class MSLS(Dataset):
         if self.mode in ['train']:
             # 计算正例采样的权重
             if positive_sampling:
-                self.__calcSamplingWeights__()
+                self.calc_sampling_weights()
             else:
                 self.weights = np.ones(len(self.q_seq_idx)) / float(len(self.q_seq_idx))
 
-    def __calcSamplingWeights__(self):
+    def __getitem__(self, index):
+
+        return None, None, None, None,
+
+    def refresh_data(self, model=None, output_dim=None):
+        """
+        刷新数据，原因是每个EPOCH都不是取全部数据，而是一部分数据，即cached_queries多的数据，所以要刷新数据，来获取新数据
+
+        :param model: 如果网络已经存在，那么使用该网络对图像进行特征提取，用于验证集或测试集
+        :param output_dim: 网络输出的维度
+        """
+        # 清空数据
+        self.triplets_data.clear()
+
+        if model is None:
+            # 随机从q_seq_idx中采样cached_queries长度的数据索引
+            q_choice_idxs = np.random.choice(len(self.q_seq_idx), self.cached_queries, replace=False)
+
+            for q_choice_idx in q_choice_idxs:
+                # 读取随机采样的Query索引
+                q_idx = self.q_seq_idx[q_choice_idx]
+                # 读取随机采样的Query的正例索引，并随机从Query的正例中选取1个正例
+                p_idx = np.random.choice(self.p_seq_idx[q_choice_idx], size=1)[0]
+
+                while True:
+                    # 从数据库中随机读取negative_num个反例
+                    n_idxs = np.random.choice(len(self.db_images_key), self.negative_num)
+
+                    # Query的negative_distance_threshold距离外才被认为是负例，而negative_distance_threshold内认为是正例或非负例，
+                    # 下面的判断是为了保证选择负例不在negative_distance_threshold范围内
+                    if sum(np.in1d(n_idxs, self.non_negative_indices[q_choice_idx])) == 0:
+                        break
+
+                # 创建三元数据和对应的标签
+                triplet = [q_idx, p_idx, *n_idxs]
+                target = [-1, 1] + [0] * len(n_idxs)
+
+                self.triplets_data.append((triplet, target))
+
+            # 子数据集调用次数+1
+            self.current_subset += 1
+
+            return
+
+        # todo 如果model存在，那么就需要下面对图像进行特征提取
+        pass
+
+    def calc_sampling_weights(self):
         """
         计算数据权重
         """
@@ -301,7 +357,6 @@ class MSLS(Dataset):
             tqdm.write("侧面且白天的权重为{:.4f}".format(1 + N / len(self.sideways)))
         if len(self.sideways) != 0 and len(self.night) != 0:
             tqdm.write("侧面且夜间的权重为{:.4f}".format(1 + N / len(self.night) + N / len(self.sideways)))
-
 
     def seq_idx_2_frame_idx(self, q_seq_key, q_seq_keys):
         """
@@ -380,7 +435,7 @@ class MSLS(Dataset):
 
         return seq_keys, np.asarray(seq_idxs)
 
-    def filter(self, seq_keys, seq_idxs, center_frame_condition):
+    def data_filter(self, seq_keys, seq_idxs, center_frame_condition):
         """
         根据序列中心点索引筛选序列
 
@@ -399,10 +454,6 @@ class MSLS(Dataset):
 
     def __len__(self):
         return 10
-
-    def __getitem__(self, index):
-
-        return None, None, None, None,
 
     @staticmethod
     def collate_fn(batch):
