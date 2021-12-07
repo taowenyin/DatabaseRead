@@ -15,7 +15,7 @@ if __name__ == '__main__':
     dataset = MSLS(root_dir=opt.dataset_root_dir, cities_list='trondheim,london',
                    mode='train', task='im2im', seq_length=1)
 
-    dataset.refresh_data()
+    dataset.new_epoch()
 
     # data_loader = DataLoader(dataset=dataset, batch_size=10, shuffle=False, collate_fn=MSLS.collate_fn)
     #

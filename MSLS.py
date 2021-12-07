@@ -1,13 +1,15 @@
-from torch.utils.data import Dataset
-from torch.utils.data.dataset import T_co
-from tqdm import tqdm
-from os.path import join
-from sklearn.neighbors import NearestNeighbors
-
+import math
+import random
 import pandas as pd
 import numpy as np
 import sys
 
+import torch
+from torch.utils.data import Dataset
+from tqdm import tqdm
+from os.path import join
+from sklearn.neighbors import NearestNeighbors
+from PIL import Image
 
 default_cities = {
     'train': ['trondheim', 'london', 'boston', 'melbourne', 'amsterdam', 'helsinki',
@@ -81,6 +83,10 @@ class MSLS(Dataset):
 
         # 记录当前EPOCH调用数据集自己的次数，也就是多少个cached_queries数据
         self.current_subset = 0
+        # 每批cached_queries个数据，提供有多少批数据
+        self.cached_subset_size = 0
+
+        self.img_transform = img_transform
 
         # 根据任务类型得到序列长度
         if task == 'im2im': # 图像到图像
@@ -286,8 +292,42 @@ class MSLS(Dataset):
                 self.weights = np.ones(len(self.q_seq_idx)) / float(len(self.q_seq_idx))
 
     def __getitem__(self, index):
+        # 获取对应的数据和标签
+        triplet, target = self.triplets[index]
 
-        return None, None, None, None,
+        # 获取Query、Positive和Negative的索引
+        q_idx = triplet[0]
+        p_idx = triplet[1]
+        n_idx = triplet[2:]
+
+        # 返回图像信息
+        query = self.img_transform(Image.open(self.q_images_key[q_idx]))
+        positive = self.img_transform(Image.open(self.db_images_key[p_idx]))
+        negatives = [self.img_transform(Image.open(self.db_images_key[idx])) for idx in n_idx]
+        negatives = torch.stack(negatives, 0)
+
+        return query, positive, negatives, [q_idx, p_idx] + n_idx
+
+    def __len__(self):
+        return len(self.triplets_data)
+
+    def new_epoch(self):
+        ##################### 在验证机或测试集上使用
+        # 通过向上取整后，计算一共有多少批Query数据
+        self.cached_subset_size = math.ceil(len(self.q_seq_idx) / self.cached_queries)
+
+        # 构建所有数据集的索引数组
+        q_seq_idx_array = np.arange(len(self.q_seq_idx))
+
+        # 使用采样方式对Query数据集进行采样
+        q_seq_idx_array = random.choices(q_seq_idx_array, self.weights, k=len(q_seq_idx_array))
+
+        # 把随机采样的Query数据集分为cached_subset_size份
+        self.cached_subset_idx = np.array_split(q_seq_idx_array, self.cached_subset_size)
+        #######################
+
+        # 重置子集的计数
+        self.current_subset = 0
 
     def refresh_data(self, model=None, output_dim=None):
         """
@@ -451,9 +491,6 @@ class MSLS(Dataset):
                 keys.append(key)
                 idxs.append(idx)
         return keys, np.asarray(idxs)
-
-    def __len__(self):
-        return 10
 
     @staticmethod
     def collate_fn(batch):
