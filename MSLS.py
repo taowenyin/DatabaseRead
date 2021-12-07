@@ -3,6 +3,9 @@ import random
 import pandas as pd
 import numpy as np
 import sys
+import torchvision.transforms as transforms
+import torch.utils.data as data
+import itertools
 
 import torch
 from torch.utils.data import Dataset
@@ -20,8 +23,30 @@ default_cities = {
 }
 
 
+def input_transform(resize=(480, 640)):
+    """
+    对图像进行转换
+
+    :param resize: 转换后的图像大小
+    :return: 返回转换对象
+    """
+    if resize[0] > 0 and resize[1] > 0:
+        return transforms.Compose([
+            transforms.Resize(resize),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+    else:
+        return transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+
+
 class MSLS(Dataset):
-    def __init__(self, root_dir, mode='train', cities_list=None, img_transform=None, negative_size=5,
+    def __init__(self, root_dir, mode='train', cities_list=None, img_transform=input_transform(), negative_size=5,
                  positive_distance_threshold=10, negative_distance_threshold=25, cached_queries=1000,
                  batch_size=24, task='im2im', sub_task='all', seq_length=1, exclude_panos=True, positive_sampling=True):
         """
@@ -285,7 +310,7 @@ class MSLS(Dataset):
         self.night = np.asarray(self.night)
 
         if self.mode in ['train']:
-            # 计算正例采样的权重
+            # 计算Query采样时的权重，即晚上和路边权重高，容易被采到
             if positive_sampling:
                 self.calc_sampling_weights()
             else:
@@ -293,7 +318,7 @@ class MSLS(Dataset):
 
     def __getitem__(self, index):
         # 获取对应的数据和标签
-        triplet, target = self.triplets[index]
+        triplet, target = self.triplets_data[index]
 
         # 获取Query、Positive和Negative的索引
         q_idx = triplet[0]
@@ -312,10 +337,13 @@ class MSLS(Dataset):
         return len(self.triplets_data)
 
     def new_epoch(self):
-        ##################### 在验证机或测试集上使用
+        """
+        每次要读数据时运行改程序，把数据分为若干批，每一批再通过循环输入模型
+        """
         # 通过向上取整后，计算一共有多少批Query数据
         self.cached_subset_size = math.ceil(len(self.q_seq_idx) / self.cached_queries)
 
+        ##################### 在验证机或测试集上使用
         # 构建所有数据集的索引数组
         q_seq_idx_array = np.arange(len(self.q_seq_idx))
 
@@ -494,8 +522,25 @@ class MSLS(Dataset):
 
     @staticmethod
     def collate_fn(batch):
+        """
+        从三元数据列表中创建mini-batch
+
+        :param batch: batch数据
+        :return: query: 数据的形状为(batch_size, 3, h, w); positive: 数据的形状为(batch_size, 3, h, w); negatives: 数据的形状为(batch_size, n, 3, h, w)，n表示反例的个数
+        """
+        # 对Batch中所有的数据进行检查
         batch = list(filter(lambda x: x is not None, batch))
 
+        if len(batch) == 0:
+            return None, None, None, None, None
 
-        return None
+        query, positive, negatives, indices = zip(*batch)
+
+        query = data.dataloader.default_collate(query)
+        positive = data.dataloader.default_collate(positive)
+        negative_counts = data.dataloader.default_collate([x.shape[0] for x in negatives])
+        negatives = torch.cat([torch.unsqueeze(x, 0) for x in negatives], 0)
+        indices = torch.from_numpy(np.asarray(indices))
+
+        return query, positive, negatives, negative_counts, indices
 
