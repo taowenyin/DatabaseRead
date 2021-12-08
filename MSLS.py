@@ -23,30 +23,8 @@ default_cities = {
 }
 
 
-def input_transform(resize=(480, 640)):
-    """
-    对图像进行转换
-
-    :param resize: 转换后的图像大小
-    :return: 返回转换对象
-    """
-    if resize[0] > 0 and resize[1] > 0:
-        return transforms.Compose([
-            transforms.Resize(resize),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
-    else:
-        return transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225]),
-        ])
-
-
 class MSLS(Dataset):
-    def __init__(self, root_dir, mode='train', cities_list=None, img_transform=input_transform(), negative_size=5,
+    def __init__(self, root_dir, mode='train', cities_list=None, img_resize=(480, 640), negative_size=5,
                  positive_distance_threshold=10, negative_distance_threshold=25, cached_queries=1000,
                  batch_size=24, task='im2im', sub_task='all', seq_length=1, exclude_panos=True, positive_sampling=True):
         """
@@ -59,7 +37,7 @@ class MSLS(Dataset):
         :param root_dir: 数据集的路径
         :param mode: 数据集的模式[train, val, test]
         :param cities_list: 城市列表
-        :param img_transform: 图像转换函数
+        :param img_resize: 图像大小
         :param negative_size: 每个正例对应的反例个数
         :param positive_distance_threshold: 正例的距离阈值
         :param negative_distance_threshold: 反例的距离阈值，在该距离之内认为是非反例，之外才属于反例，同时正例要在正例阈值内才算正例，正例阈值和负例阈值之间属于非负例
@@ -74,44 +52,46 @@ class MSLS(Dataset):
         super().__init__()
 
         if cities_list is None:
-            self.cities_list = default_cities[mode]
+            self.__cities_list = default_cities[mode]
         else:
-            self.cities_list = cities_list.split(',')
+            self.__cities_list = cities_list.split(',')
 
         # 筛选后的Query图像
-        self.q_images_key = []
+        self.__q_images_key = []
         # 筛选后的Database图像
-        self.db_images_key = []
-        # 所有Query对应的正例索引
-        self.all_positive_indices = []
+        self.__db_images_key = []
         # Query的序列索引
-        self.q_seq_idx = []
+        self.__q_seq_idx = []
         # positive的序列索引
-        self.p_seq_idx = []
+        self.__p_seq_idx = []
         # 不是负例的索引
-        self.non_negative_indices = []
+        self.__non_negative_indices = []
         # 路边的数据
-        self.sideways = []
+        self.__sideways = []
         # 晚上的数据
-        self.night = []
+        self.__night = []
 
         # 三元数据
-        self.triplets_data = []
+        self.__triplets_data = []
 
-        self.mode = mode
-        self.sub_task = sub_task
-        self.exclude_panos = exclude_panos
-        self.negative_num = negative_size
-        self.positive_distance_threshold = positive_distance_threshold
-        self.negative_distance_threshold = negative_distance_threshold
-        self.cached_queries = cached_queries
+        self.__mode = mode
+        self.__sub_task = sub_task
+        self.__exclude_panos = exclude_panos
+        self.__negative_num = negative_size
+        self.__positive_distance_threshold = positive_distance_threshold
+        self.__negative_distance_threshold = negative_distance_threshold
+        self.__cached_queries = cached_queries
 
         # 记录当前EPOCH调用数据集自己的次数，也就是多少个cached_queries数据
-        self.current_subset = 0
+        self.__current_subset = 0
+
+        # 得到图像转换对象
+        self.__img_transform = self.__input_transform(img_resize)
+
+        # 所有Query对应的正例索引
+        self.all_positive_indices = []
         # 每批cached_queries个数据，提供有多少批数据
         self.cached_subset_size = 0
-
-        self.img_transform = img_transform
 
         # 根据任务类型得到序列长度
         if task == 'im2im': # 图像到图像
@@ -124,7 +104,7 @@ class MSLS(Dataset):
             seq_length_q, seq_length_db = 1, seq_length
 
         # 载入数据
-        load_data_bar = tqdm(self.cities_list)
+        load_data_bar = tqdm(self.__cities_list)
         for city in load_data_bar:
             load_data_bar.set_description('=====> Load {} data'.format(city))
 
@@ -139,11 +119,11 @@ class MSLS(Dataset):
             q_seq_keys_count = 0
 
             # 获取到目前为止用于索引的城市图像的长度
-            _lenQ = len(self.q_images_key)
-            _lenDb = len(self.db_images_key)
+            _lenQ = len(self.__q_images_key)
+            _lenDb = len(self.__db_images_key)
 
             # 读取训练集或验证集数据集
-            if self.mode in ['train', 'val']:
+            if self.__mode in ['train', 'val']:
                 # 载入Query数据
                 q_data = pd.read_csv(join(root_dir, subdir, city, 'query', 'postprocessed.csv'), index_col=0)
                 q_data_raw = pd.read_csv(join(root_dir, subdir, city, 'query', 'raw.csv'), index_col=0)
@@ -153,33 +133,33 @@ class MSLS(Dataset):
                 db_data_raw = pd.read_csv(join(root_dir, subdir, city, 'database', 'raw.csv'), index_col=0)
 
                 # 根据任务把数据变成序列
-                q_seq_keys, q_seq_idxs = self.rang_to_sequence(q_data, join(root_dir, subdir, city, 'query'),
-                                                               seq_length_q)
-                db_seq_keys, db_seq_idxs = self.rang_to_sequence(db_data, join(root_dir, subdir, city, 'database'),
-                                                                 seq_length_db)
+                q_seq_keys, q_seq_idxs = self.__rang_to_sequence(q_data, join(root_dir, subdir, city, 'query'),
+                                                                 seq_length_q)
+                db_seq_keys, db_seq_idxs = self.__rang_to_sequence(db_data, join(root_dir, subdir, city, 'database'),
+                                                                   seq_length_db)
                 q_seq_keys_count = len(q_seq_keys)
 
                 # 如果验证集，那么需要确定子任务的类型
-                if self.mode in ['val']:
+                if self.__mode in ['val']:
                     q_idx = pd.read_csv(join(root_dir, subdir, city, 'query', 'subtask_index.csv'), index_col=0)
                     db_idx = pd.read_csv(join(root_dir, subdir, city, 'database', 'subtask_index.csv'), index_col=0)
 
                     # 从所有序列数据中根据符合子任务的中心索引找到序列数据帧
-                    val_frames = np.where(q_idx[self.sub_task])[0]
-                    q_seq_keys, q_seq_idxs = self.data_filter(q_seq_keys, q_seq_idxs, val_frames)
+                    val_frames = np.where(q_idx[self.__sub_task])[0]
+                    q_seq_keys, q_seq_idxs = self.__data_filter(q_seq_keys, q_seq_idxs, val_frames)
 
-                    val_frames = np.where(db_idx[self.sub_task])[0]
-                    db_seq_keys, db_seq_idxs = self.data_filter(db_seq_keys, db_seq_idxs, val_frames)
+                    val_frames = np.where(db_idx[self.__sub_task])[0]
+                    db_seq_keys, db_seq_idxs = self.__data_filter(db_seq_keys, db_seq_idxs, val_frames)
 
                 # 筛选出不同全景的数据
-                if self.exclude_panos:
+                if self.__exclude_panos:
                     panos_frames = np.where((q_data_raw['pano'] == False).values)[0]
                     # 从Query数据中筛选出不是全景的数据
-                    q_seq_keys, q_seq_idxs = self.data_filter(q_seq_keys, q_seq_idxs, panos_frames)
+                    q_seq_keys, q_seq_idxs = self.__data_filter(q_seq_keys, q_seq_idxs, panos_frames)
 
                     panos_frames = np.where((db_data_raw['pano'] == False).values)[0]
                     # 从Query数据中筛选出不是全景的数据
-                    db_seq_keys, db_seq_idxs = self.data_filter(db_seq_keys, db_seq_idxs, panos_frames)
+                    db_seq_keys, db_seq_idxs = self.__data_filter(db_seq_keys, db_seq_idxs, panos_frames)
 
                 # 删除重复的idx
                 unique_q_seq_idxs = np.unique(q_seq_idxs)
@@ -190,8 +170,8 @@ class MSLS(Dataset):
                     continue
 
                 # 保存筛选后的图像
-                self.q_images_key.extend(q_seq_keys)
-                self.db_images_key.extend(db_seq_keys)
+                self.__q_images_key.extend(q_seq_keys)
+                self.__db_images_key.extend(db_seq_keys)
 
                 # 从原数据中筛选后数据
                 q_data = q_data.loc[unique_q_seq_idxs]
@@ -211,81 +191,81 @@ class MSLS(Dataset):
                 # 对数据集进行拟合
                 neigh.fit(utm_db)
                 # 在Database中找到符合positive_distance_threshold要求的Query数据的最近邻数据的索引
-                positive_distance, positive_indices = neigh.radius_neighbors(utm_q, self.positive_distance_threshold)
+                positive_distance, positive_indices = neigh.radius_neighbors(utm_q, self.__positive_distance_threshold)
                 # 保存所有正例索引
                 self.all_positive_indices.extend(positive_indices)
 
                 # 训练模式下，获取负例索引
-                if self.mode == 'train':
+                if self.__mode == 'train':
                     negative_distance, negative_indices = neigh.radius_neighbors(
-                        utm_q, self.negative_distance_threshold)
+                        utm_q, self.__negative_distance_threshold)
 
                 # 查看每个Seq的正例
                 for q_seq_key_idx in range(len(q_seq_keys)):
                     # 返回每个序列的帧集合
-                    q_frame_idxs = self.seq_idx_2_frame_idx(q_seq_key_idx, q_seq_idxs)
+                    q_frame_idxs = self.__seq_idx_2_frame_idx(q_seq_key_idx, q_seq_idxs)
                     # 返回q_frame_idxs在unique_q_seq_idxs中的索引集合
-                    q_uniq_frame_idx = self.frame_idx_2_uniq_frame_idx(q_frame_idxs, unique_q_seq_idxs)
+                    q_uniq_frame_idx = self.__frame_idx_2_uniq_frame_idx(q_frame_idxs, unique_q_seq_idxs)
                     # 返回序列Query中序列对应的正例索引
                     positive_uniq_frame_idxs = np.unique([p for pos in positive_indices[q_uniq_frame_idx] for p in pos])
 
                     # 查询的序列Query至少要有一个正例
                     if len(positive_uniq_frame_idxs) > 0:
                         # 获取正例所在的序列索引，并去除重复的索引
-                        positive_seq_idx = np.unique(self.uniq_frame_idx_2_seq_idx(
+                        positive_seq_idx = np.unique(self.__uniq_frame_idx_2_seq_idx(
                             unique_db_seq_idxs[positive_uniq_frame_idxs], db_seq_idxs))
 
                         # todo 不知道是什么意思
-                        self.p_seq_idx.append(positive_seq_idx + _lenDb)
-                        self.q_seq_idx.append(q_seq_key_idx + _lenQ)
+                        self.__p_seq_idx.append(positive_seq_idx + _lenDb)
+                        self.__q_seq_idx.append(q_seq_key_idx + _lenQ)
 
                         # 在训练的时候需要根据两个阈值找到正例和负例
-                        if self.mode == 'train':
+                        if self.__mode == 'train':
                             # 找到不是负例的数据
                             n_uniq_frame_idxs = np.unique(
                                 [n for nonNeg in negative_indices[q_uniq_frame_idx] for n in nonNeg])
                             # 找到不是负例所在的序列索引，并去除重复的索引
                             n_seq_idx = np.unique(
-                                self.uniq_frame_idx_2_seq_idx(unique_db_seq_idxs[n_uniq_frame_idxs], db_seq_idxs))
+                                self.__uniq_frame_idx_2_seq_idx(unique_db_seq_idxs[n_uniq_frame_idxs], db_seq_idxs))
 
                             # 保存数据
-                            self.non_negative_indices.append(n_seq_idx + _lenDb)
+                            self.__non_negative_indices.append(n_seq_idx + _lenDb)
 
                             # todo 不知道是什么意思
                             if sum(night[np.in1d(index, q_frame_idxs)]) > 0:
-                                self.night.append(len(self.q_seq_idx) - 1)
+                                self.__night.append(len(self.__q_seq_idx) - 1)
                             if sum(sideways[np.in1d(index, q_frame_idxs)]) > 0:
-                                self.sideways.append(len(self.q_seq_idx) - 1)
+                                self.__sideways.append(len(self.__q_seq_idx) - 1)
 
                         has_positive_q_seq_keys_count += 1
                     else:
                         non_positive_q_seq_keys_count += 1
 
             # 读取测试集数据集，GPS/UTM/Pano都不可用
-            elif self.mode in ['test']:
+            elif self.__mode in ['test']:
                 # 载入对应子任务的图像索引
                 q_idx = pd.read_csv(join(root_dir, subdir, city, 'query', 'subtask_index.csv'), index_col=0)
                 db_idx = pd.read_csv(join(root_dir, subdir, city, 'database', 'subtask_index.csv'), index_col=0)
 
                 # 根据任务把数据变成序列
-                q_seq_keys, q_seq_idxs = self.rang_to_sequence(q_idx, join(root_dir, subdir, city, 'query'),
-                                                               seq_length_q)
-                db_seq_keys, db_seq_idxs = self.rang_to_sequence(db_idx, join(root_dir, subdir, city, 'database'),
-                                                                 seq_length_db)
+                q_seq_keys, q_seq_idxs = self.__rang_to_sequence(q_idx, join(root_dir, subdir, city, 'query'),
+                                                                 seq_length_q)
+                db_seq_keys, db_seq_idxs = self.__rang_to_sequence(db_idx, join(root_dir, subdir, city, 'database'),
+                                                                   seq_length_db)
 
                 # 从所有序列数据中根据符合子任务的中心索引找到序列数据帧
-                val_frames = np.where(q_idx[self.sub_task])[0]
-                q_seq_keys, q_seq_idxs = self.data_filter(q_seq_keys, q_seq_idxs, val_frames)
+                val_frames = np.where(q_idx[self.__sub_task])[0]
+                q_seq_keys, q_seq_idxs = self.__data_filter(q_seq_keys, q_seq_idxs, val_frames)
 
-                val_frames = np.where(db_idx[self.sub_task])[0]
-                db_seq_keys, db_seq_idxs = self.data_filter(db_seq_keys, db_seq_idxs, val_frames)
+                val_frames = np.where(db_idx[self.__sub_task])[0]
+                db_seq_keys, db_seq_idxs = self.__data_filter(db_seq_keys, db_seq_idxs, val_frames)
 
                 # 保存筛选后的图像
-                self.q_images_key.extend(q_seq_keys)
-                self.db_images_key.extend(db_seq_keys)
+                self.__q_images_key.extend(q_seq_keys)
+                self.__db_images_key.extend(db_seq_keys)
 
                 # 添加Query索引
-                self.q_seq_idx.extend(list(range(_lenQ, len(q_seq_keys) + _lenQ)))
+                self.__q_seq_idx.extend(list(range(_lenQ, len(q_seq_keys) + _lenQ)))
 
             tqdm.write('{}城市的数据，有正例的图像有[{}/{}]个，没有正例的图像有[{}/{}]个'.format(
                 city,
@@ -295,30 +275,31 @@ class MSLS(Dataset):
                 q_seq_keys_count))
 
         # 如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出。
-        if len(self.q_images_key) == 0 or len(self.db_images_key) == 0:
+        if len(self.__q_images_key) == 0 or len(self.__db_images_key) == 0:
             tqdm.write("退出...")
             tqdm.write("如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出")
             tqdm.write("尝试选择不同的子任务或其他城市")
             sys.exit()
 
-        self.q_seq_idx = np.asarray(self.q_seq_idx)
-        self.q_images_key = np.asarray(self.q_images_key)
-        self.p_seq_idx = np.asarray(self.p_seq_idx, dtype=object)
-        self.non_negative_indices = np.asarray(self.non_negative_indices, dtype=object)
-        self.db_images_key= np.asarray(self.db_images_key)
-        self.sideways = np.asarray(self.sideways)
-        self.night = np.asarray(self.night)
+        self.__q_seq_idx = np.asarray(self.__q_seq_idx)
+        self.__q_images_key = np.asarray(self.__q_images_key)
+        self.__p_seq_idx = np.asarray(self.__p_seq_idx, dtype=object)
+        self.__non_negative_indices = np.asarray(self.__non_negative_indices, dtype=object)
+        self.__db_images_key= np.asarray(self.__db_images_key)
+        self.__sideways = np.asarray(self.__sideways)
+        self.__night = np.asarray(self.__night)
 
-        if self.mode in ['train']:
+        if self.__mode in ['train']:
             # 计算Query采样时的权重，即晚上和路边权重高，容易被采到
             if positive_sampling:
-                self.calc_sampling_weights()
+                self.__calc_sampling_weights()
             else:
-                self.weights = np.ones(len(self.q_seq_idx)) / float(len(self.q_seq_idx))
+                self.__weights = np.ones(len(self.__q_seq_idx)) / float(len(self.__q_seq_idx))
 
+    # ----------------------------------
     def __getitem__(self, index):
         # 获取对应的数据和标签
-        triplet, target = self.triplets_data[index]
+        triplet, target = self.__triplets_data[index]
 
         # 获取Query、Positive和Negative的索引
         q_idx = triplet[0]
@@ -326,37 +307,62 @@ class MSLS(Dataset):
         n_idx = triplet[2:]
 
         # 返回图像信息
-        query = self.img_transform(Image.open(self.q_images_key[q_idx]))
-        positive = self.img_transform(Image.open(self.db_images_key[p_idx]))
-        negatives = [self.img_transform(Image.open(self.db_images_key[idx])) for idx in n_idx]
-        negatives = torch.stack(negatives, 0)
+        query = self.__img_transform(Image.open(self.__q_images_key[q_idx]))
+        positive = self.__img_transform(Image.open(self.__db_images_key[p_idx]))
+        negatives = torch.stack([self.__img_transform(Image.open(self.__db_images_key[idx])) for idx in n_idx], 0)
 
         return query, positive, negatives, [q_idx, p_idx] + n_idx
 
     def __len__(self):
-        return len(self.triplets_data)
+        return len(self.__triplets_data)
 
+    # -----------------------------------
+    def __input_transform(self, resize):
+        """
+        对图像进行转换
+
+        :param resize: 转换后的图像大小
+        :return: 返回转换对象
+        """
+
+        if resize[0] > 0 and resize[1] > 0:
+            return transforms.Compose([
+                transforms.Resize(resize),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225]),
+            ])
+
+    # -------------------------------
     def new_epoch(self):
         """
-        每次要读数据时运行改程序，把数据分为若干批，每一批再通过循环输入模型
+        每一个EPOCH都需要运行改程序，主要作用是把数据分为若干批，每一批再通过循环输出模型
         """
+
         # 通过向上取整后，计算一共有多少批Query数据
-        self.cached_subset_size = math.ceil(len(self.q_seq_idx) / self.cached_queries)
+        self.cached_subset_size = math.ceil(len(self.__q_seq_idx) / self.__cached_queries)
 
         ##################### 在验证机或测试集上使用
         # 构建所有数据集的索引数组
-        q_seq_idx_array = np.arange(len(self.q_seq_idx))
+        q_seq_idx_array = np.arange(len(self.__q_seq_idx))
 
         # 使用采样方式对Query数据集进行采样
-        q_seq_idx_array = random.choices(q_seq_idx_array, self.weights, k=len(q_seq_idx_array))
+        q_seq_idx_array = random.choices(q_seq_idx_array, self.__weights, k=len(q_seq_idx_array))
 
         # 把随机采样的Query数据集分为cached_subset_size份
-        self.cached_subset_idx = np.array_split(q_seq_idx_array, self.cached_subset_size)
+        self.__cached_subset_idx = np.array_split(q_seq_idx_array, self.cached_subset_size)
         #######################
 
         # 重置子集的计数
-        self.current_subset = 0
+        self.__current_subset = 0
 
+    # --------------------------------------------------------
     def refresh_data(self, model=None, output_dim=None):
         """
         刷新数据，原因是每个EPOCH都不是取全部数据，而是一部分数据，即cached_queries多的数据，所以要刷新数据，来获取新数据
@@ -365,68 +371,69 @@ class MSLS(Dataset):
         :param output_dim: 网络输出的维度
         """
         # 清空数据
-        self.triplets_data.clear()
+        self.__triplets_data.clear()
 
         if model is None:
             # 随机从q_seq_idx中采样cached_queries长度的数据索引
-            q_choice_idxs = np.random.choice(len(self.q_seq_idx), self.cached_queries, replace=False)
+            q_choice_idxs = np.random.choice(len(self.__q_seq_idx), self.__cached_queries, replace=False)
 
             for q_choice_idx in q_choice_idxs:
                 # 读取随机采样的Query索引
-                q_idx = self.q_seq_idx[q_choice_idx]
+                q_idx = self.__q_seq_idx[q_choice_idx]
                 # 读取随机采样的Query的正例索引，并随机从Query的正例中选取1个正例
-                p_idx = np.random.choice(self.p_seq_idx[q_choice_idx], size=1)[0]
+                p_idx = np.random.choice(self.__p_seq_idx[q_choice_idx], size=1)[0]
 
                 while True:
                     # 从数据库中随机读取negative_num个反例
-                    n_idxs = np.random.choice(len(self.db_images_key), self.negative_num)
+                    n_idxs = np.random.choice(len(self.__db_images_key), self.__negative_num)
 
                     # Query的negative_distance_threshold距离外才被认为是负例，而negative_distance_threshold内认为是正例或非负例，
                     # 下面的判断是为了保证选择负例不在negative_distance_threshold范围内
-                    if sum(np.in1d(n_idxs, self.non_negative_indices[q_choice_idx])) == 0:
+                    if sum(np.in1d(n_idxs, self.__non_negative_indices[q_choice_idx])) == 0:
                         break
 
                 # 创建三元数据和对应的标签
                 triplet = [q_idx, p_idx, *n_idxs]
                 target = [-1, 1] + [0] * len(n_idxs)
 
-                self.triplets_data.append((triplet, target))
+                self.__triplets_data.append((triplet, target))
 
             # 子数据集调用次数+1
-            self.current_subset += 1
+            self.__current_subset += 1
 
             return
 
         # todo 如果model存在，那么就需要下面对图像进行特征提取
         pass
 
-    def calc_sampling_weights(self):
+    # -------------------------------------------------
+    def __calc_sampling_weights(self):
         """
         计算数据权重
         """
         # 计算Query大小
-        N = len(self.q_seq_idx)
+        N = len(self.__q_seq_idx)
 
         # 初始化权重都为1
-        self.weights = np.ones(N)
+        self.__weights = np.ones(N)
 
         # 夜间或侧面时权重更高
-        if len(self.night) != 0:
-            self.weights[self.night] += N / len(self.night)
-        if len(self.sideways) != 0:
-            self.weights[self.sideways] += N / len(self.sideways)
+        if len(self.__night) != 0:
+            self.__weights[self.__night] += N / len(self.__night)
+        if len(self.__sideways) != 0:
+            self.__weights[self.__sideways] += N / len(self.__sideways)
 
         # 打印权重信息
-        tqdm.write("#侧面 [{}/{}]; #夜间; [{}/{}]".format(len(self.sideways), N, len(self.night), N))
+        tqdm.write("#侧面 [{}/{}]; #夜间; [{}/{}]".format(len(self.__sideways), N, len(self.__night), N))
         tqdm.write("正面和白天的权重为{:.4f}".format(1))
-        if len(self.night) != 0:
-            tqdm.write("正面且夜间的权重为{:.4f}".format(1 + N / len(self.night)))
-        if len(self.sideways) != 0:
-            tqdm.write("侧面且白天的权重为{:.4f}".format(1 + N / len(self.sideways)))
-        if len(self.sideways) != 0 and len(self.night) != 0:
-            tqdm.write("侧面且夜间的权重为{:.4f}".format(1 + N / len(self.night) + N / len(self.sideways)))
+        if len(self.__night) != 0:
+            tqdm.write("正面且夜间的权重为{:.4f}".format(1 + N / len(self.__night)))
+        if len(self.__sideways) != 0:
+            tqdm.write("侧面且白天的权重为{:.4f}".format(1 + N / len(self.__sideways)))
+        if len(self.__sideways) != 0 and len(self.__night) != 0:
+            tqdm.write("侧面且夜间的权重为{:.4f}".format(1 + N / len(self.__night) + N / len(self.__sideways)))
 
-    def seq_idx_2_frame_idx(self, q_seq_key, q_seq_keys):
+    def __seq_idx_2_frame_idx(self, q_seq_key, q_seq_keys):
         """
         把序列索引转化为帧索引
 
@@ -436,7 +443,7 @@ class MSLS(Dataset):
         """
         return q_seq_keys[q_seq_key]
 
-    def frame_idx_2_uniq_frame_idx(self, frame_idx, uniq_frame_idx):
+    def __frame_idx_2_uniq_frame_idx(self, frame_idx, uniq_frame_idx):
         """
         获取frame_idx在uniq_frame_idx中的索引列表
 
@@ -451,7 +458,7 @@ class MSLS(Dataset):
         # 返回frame_idx在uniq_frame_idx中的索引
         return np.where(frame_mask)[0]
 
-    def uniq_frame_idx_2_seq_idx(self, frame_idxs, seq_idxs):
+    def __uniq_frame_idx_2_seq_idx(self, frame_idxs, seq_idxs):
         """
         返回图像帧对应的序列索引
 
@@ -468,7 +475,7 @@ class MSLS(Dataset):
         # 得到序列的索引
         return np.where(mask)[0]
 
-    def rang_to_sequence(self, data, path, seq_length):
+    def __rang_to_sequence(self, data, path, seq_length):
         """
         把数组变为序列
 
@@ -503,7 +510,7 @@ class MSLS(Dataset):
 
         return seq_keys, np.asarray(seq_idxs)
 
-    def data_filter(self, seq_keys, seq_idxs, center_frame_condition):
+    def __data_filter(self, seq_keys, seq_idxs, center_frame_condition):
         """
         根据序列中心点索引筛选序列
 
@@ -520,6 +527,7 @@ class MSLS(Dataset):
                 idxs.append(idx)
         return keys, np.asarray(idxs)
 
+    # ---------------------------------------------
     @staticmethod
     def collate_fn(batch):
         """
