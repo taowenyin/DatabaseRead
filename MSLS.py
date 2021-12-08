@@ -88,6 +88,9 @@ class MSLS(Dataset):
         # 得到图像转换对象
         self.__img_transform = self.__input_transform(img_resize)
 
+        # 把所有数据分为若干批，每批数据的集合
+        self.__cached_subset_idx = []
+
         # 所有Query对应的正例索引
         self.all_positive_indices = []
         # 每批cached_queries个数据，提供有多少批数据
@@ -106,7 +109,7 @@ class MSLS(Dataset):
         # 载入数据
         load_data_bar = tqdm(self.__cities_list)
         for city in load_data_bar:
-            load_data_bar.set_description('=====> Load {} data'.format(city))
+            load_data_bar.set_description('=====> 载入{}数据'.format(city))
 
             # 根据城市获得数据文件夹名称
             subdir = 'test' if city in default_cities['test'] else 'train_val'
@@ -267,7 +270,7 @@ class MSLS(Dataset):
                 # 添加Query索引
                 self.__q_seq_idx.extend(list(range(_lenQ, len(q_seq_keys) + _lenQ)))
 
-            tqdm.write('{}城市的数据，有正例的图像有[{}/{}]个，没有正例的图像有[{}/{}]个'.format(
+            print('\n=====> {}数据，有正例的[{}/{}]个，无正例的[{}/{}]个'.format(
                 city,
                 has_positive_q_seq_keys_count,
                 q_seq_keys_count,
@@ -276,9 +279,10 @@ class MSLS(Dataset):
 
         # 如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出。
         if len(self.__q_images_key) == 0 or len(self.__db_images_key) == 0:
-            tqdm.write("退出...")
-            tqdm.write("如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出")
-            tqdm.write("尝试选择不同的子任务或其他城市")
+            print('退出...')
+            print('如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出')
+            print('如果选择了城市、任务和子任务的组合，其中没有Query和Database图像，则退出')
+            print('尝试选择不同的子任务或其他城市')
             sys.exit()
 
         self.__q_seq_idx = np.asarray(self.__q_seq_idx)
@@ -296,7 +300,6 @@ class MSLS(Dataset):
             else:
                 self.__weights = np.ones(len(self.__q_seq_idx)) / float(len(self.__q_seq_idx))
 
-    # ----------------------------------
     def __getitem__(self, index):
         # 获取对应的数据和标签
         triplet, target = self.__triplets_data[index]
@@ -316,7 +319,6 @@ class MSLS(Dataset):
     def __len__(self):
         return len(self.__triplets_data)
 
-    # -----------------------------------
     def __input_transform(self, resize):
         """
         对图像进行转换
@@ -339,7 +341,6 @@ class MSLS(Dataset):
                                      std=[0.229, 0.224, 0.225]),
             ])
 
-    # -------------------------------
     def new_epoch(self):
         """
         每一个EPOCH都需要运行改程序，主要作用是把数据分为若干批，每一批再通过循环输出模型
@@ -362,7 +363,6 @@ class MSLS(Dataset):
         # 重置子集的计数
         self.__current_subset = 0
 
-    # --------------------------------------------------------
     def refresh_data(self, model=None, output_dim=None):
         """
         刷新数据，原因是每个EPOCH都不是取全部数据，而是一部分数据，即cached_queries多的数据，所以要刷新数据，来获取新数据
@@ -406,7 +406,6 @@ class MSLS(Dataset):
         # todo 如果model存在，那么就需要下面对图像进行特征提取
         pass
 
-    # -------------------------------------------------
     def __calc_sampling_weights(self):
         """
         计算数据权重
@@ -527,7 +526,6 @@ class MSLS(Dataset):
                 idxs.append(idx)
         return keys, np.asarray(idxs)
 
-    # ---------------------------------------------
     @staticmethod
     def collate_fn(batch):
         """
